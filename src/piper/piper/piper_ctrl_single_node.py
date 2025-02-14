@@ -31,6 +31,7 @@ class PiperRosNode(Node):
 
         self.can_port = self.get_parameter('can_port').get_parameter_value().string_value
         self.auto_enable = self.get_parameter('auto_enable').get_parameter_value().bool_value
+        self.auto_enable =True
         self.gripper_exist = self.get_parameter('gripper_exist').get_parameter_value().bool_value
         self.rviz_ctrl_flag = self.get_parameter('rviz_ctrl_flag').get_parameter_value().bool_value
 
@@ -46,10 +47,10 @@ class PiperRosNode(Node):
         self.motor_srv = self.create_service(Enable, 'enable_srv', self.handle_enable_service)
         # Joint
         self.joint_states = JointState()
-        self.joint_states.name = ['joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
-        self.joint_states.position = [0.0] * 7
-        self.joint_states.velocity = [0.0] * 7
-        self.joint_states.effort = [0.0] * 7
+        self.joint_states.name = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'joint7','joint8']
+        self.joint_states.position = [0.0] * 8
+        self.joint_states.velocity = [0.0] * 8
+        self.joint_states.effort = [0.0] * 8
         # Enable flag
         self.__enable_flag = False
         # Create piper class and open CAN interface
@@ -60,7 +61,7 @@ class PiperRosNode(Node):
         self.create_subscription(PosCmd, 'pos_cmd', self.pos_callback, 1)
         self.create_subscription(JointState, 'joint_ctrl_single', self.joint_callback, 1)
         self.create_subscription(Bool, 'enable_flag', self.enable_callback, 1)
-
+        # self.PublishArmJointAndGripper()
         self.publisher_thread = threading.Thread(target=self.publish_thread)
         self.publisher_thread.start()
 
@@ -154,9 +155,9 @@ class PiperRosNode(Node):
         vel_4: float = self.piper.GetArmHighSpdInfoMsgs().motor_5.motor_speed / 1000
         vel_5: float = self.piper.GetArmHighSpdInfoMsgs().motor_6.motor_speed / 1000
         effort_6: float = self.piper.GetArmGripperMsgs().gripper_state.grippers_effort / 1000
-        self.joint_states.position = [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]  # Example values
-        self.joint_states.velocity = [vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0]  # Example values
-        self.joint_states.effort = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, effort_6]
+        self.joint_states.position = [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6,0.0]  # Example values
+        self.joint_states.velocity = [vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0,0.0]  # Example values
+        self.joint_states.effort = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, effort_6,0.0]
         self.joint_pub.publish(self.joint_states)
 
     def PublishArmEndPose(self):
@@ -179,10 +180,11 @@ class PiperRosNode(Node):
         self.end_pose_pub.publish(endpos)
 
     def pos_callback(self, pos_data):
-        """Callback function for subscribing to the end effector pose
+        """
+            Callback function for subscribing to the end effector pose
 
-        Args:
-            pos_data (): The position data
+            Args:
+                pos_data (): The position data
         """
         factor = 180 / 3.1415926
         self.get_logger().info(f"Received PosCmd:")
@@ -203,7 +205,7 @@ class PiperRosNode(Node):
         rz = round(pos_data.yaw*1000*factor)
         if(self.GetEnableFlag()):
             self.piper.MotionCtrl_1(0x00, 0x00, 0x00)
-            self.piper.MotionCtrl_2(0x01, 0x02, 50)
+            self.piper.MotionCtrl_2(0x01, 0x00, 2)
             self.piper.EndPoseCtrl(x, y, z, rx, ry, rz)
             gripper = round(pos_data.gripper * 1000 * 1000)
             if pos_data.gripper > 80000:
@@ -212,7 +214,7 @@ class PiperRosNode(Node):
                 gripper = 0
             if self.gripper_exist:
                 self.piper.GripperCtrl(abs(gripper), 1000, 0x01, 0)
-            self.piper.MotionCtrl_2(0x01, 0x00, 50)
+
 
     def joint_callback(self, joint_data):
         """Callback function for joint angles
@@ -255,9 +257,9 @@ class PiperRosNode(Node):
                     self.get_logger().info(f"vel_all: {vel_all}")
                     self.piper.MotionCtrl_2(0x01, 0x01, vel_all)
                 else:
-                    self.piper.MotionCtrl_2(0x01, 0x01, 30)
+                    self.piper.MotionCtrl_2(0x01, 0x01, 10)
             else:
-                self.piper.MotionCtrl_2(0x01, 0x01, 30)
+                self.piper.MotionCtrl_2(0x01, 0x01, 10)
             self.piper.JointCtrl(joint_0, joint_1, joint_2,
                                  joint_3, joint_4, joint_5)
             if self.gripper_exist:
@@ -356,3 +358,7 @@ def main(args=None):
     finally:
         piper_single_node.destroy_node()
         rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

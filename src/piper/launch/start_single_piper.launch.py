@@ -41,9 +41,9 @@ def generate_launch_description():
             'rviz_ctrl_flag': LaunchConfiguration('rviz_ctrl_flag'),
             'gripper_exist': LaunchConfiguration('gripper_exist'),
         }],
-        remappings=[
-            ('joint_ctrl_single', '/joint_states'),
-        ]
+        # remappings=[
+        #     ('joint_ctrl_single', '/joint_states'),
+        # ]
     )
 
     # Return the LaunchDescription
