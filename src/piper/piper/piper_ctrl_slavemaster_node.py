@@ -73,9 +73,9 @@ class PiperRosNode(Node):
         self.slave_piper.ConnectPort()
 
         # Subscription
-        # self.create_subscription(PosCmd, 'slave_piper_pos_ctrl', self.Slave_pos_callback, 1)
-        # self.create_subscription(JointState, 'slave_piper_joint_ctrl', self.Slave_joint_callback, 1)
-        # self.create_subscription(Bool, 'slave_enable_flag', self.slave_enable_callback, 1)
+        self.create_subscription(PosCmd, 'slave_piper_pos_ctrl', self.Slave_pos_callback, 1)
+        self.create_subscription(JointState, 'slave_piper_joint_ctrl', self.Slave_joint_callback, 1)
+        self.create_subscription(Bool, 'slave_enable_flag', self.Slave_enable_callback, 1)
 
         self.publisher_thread = threading.Thread(target=self.publish_thread)
         self.publisher_thread.start()
@@ -260,6 +260,119 @@ class PiperRosNode(Node):
         master_endpos_msg.orientation.z = quaternion[2]
         master_endpos_msg.orientation.w = quaternion[3]
         self.master_end_pose_pub.publish(master_endpos_msg)
+
+    def Slave_pos_callback(self,pos_data):
+        """
+            Callback function for subscribing to the end effector pose
+
+            Args:
+                pos_data (): The position data
+        """
+        factor = 180 / 3.1415926
+        self.get_logger().info(f"Received PosCmd:")
+        self.get_logger().info(f"x: {pos_data.x}")
+        self.get_logger().info(f"y: {pos_data.y}")
+        self.get_logger().info(f"z: {pos_data.z}")
+        self.get_logger().info(f"roll: {pos_data.roll}")
+        self.get_logger().info(f"pitch: {pos_data.pitch}")
+        self.get_logger().info(f"yaw: {pos_data.yaw}")
+        self.get_logger().info(f"gripper: {pos_data.gripper}")
+        self.get_logger().info(f"mode1: {pos_data.mode1}")
+        self.get_logger().info(f"mode2: {pos_data.mode2}")
+        x = round(pos_data.x*1000) * 1000
+        y = round(pos_data.y*1000) * 1000
+        z = round(pos_data.z*1000) * 1000
+        rx = round(pos_data.roll*1000*factor)
+        ry = round(pos_data.pitch*1000*factor)
+        rz = round(pos_data.yaw*1000*factor)
+        if(self.GetEnableFlag()):
+            self.slave_piper.MotionCtrl_1(0x00, 0x00, 0x00)
+            self.slave_piper.MotionCtrl_2(0x01, 0x00, 2)
+            self.slave_piper.EndPoseCtrl(x, y, z, rx, ry, rz)
+            gripper = round(pos_data.gripper * 1000 * 1000)
+            if pos_data.gripper > 80000:
+                gripper = 80000
+            if pos_data.gripper < 0:
+                gripper = 0
+            if self.gripper_exist:
+                self.slave_piper.GripperCtrl(abs(gripper), 1000, 0x01, 0)
+
+    def Slave_joint_callback(self, joint_data):
+        factor = 57324.840764  # 1000*180/3.14
+
+        self.get_logger().info(f"Received Joint States:")
+        self.get_logger().info(f"joint_0: {joint_data.position[0]}")
+        self.get_logger().info(f"joint_1: {joint_data.position[1]}")
+        self.get_logger().info(f"joint_2: {joint_data.position[2]}")
+        self.get_logger().info(f"joint_3: {joint_data.position[3]}")
+        self.get_logger().info(f"joint_4: {joint_data.position[4]}")
+        self.get_logger().info(f"joint_5: {joint_data.position[5]}")
+        joint_0 = round(joint_data.position[0]*factor)
+        joint_1 = round(joint_data.position[1]*factor)
+        joint_2 = round(joint_data.position[2]*factor)
+        joint_3 = round(joint_data.position[3]*factor)
+        joint_4 = round(joint_data.position[4]*factor)
+        joint_5 = round(joint_data.position[5]*factor)
+        if (len(joint_data.position) >= 7):
+            self.get_logger().info(f"joint_6: {joint_data.position[6]}")
+            joint_6 = round(joint_data.position[6]*1000*1000)
+            if(self.rviz_ctrl_flag):
+                joint_6 = joint_6 * 2
+            joint_6 = clip(joint_6, 0, 80000)
+        else: joint_6 = 0
+        if (self.GetEnableFlag()):
+            if(joint_data.velocity != []):
+                all_zeros = all(v == 0 for v in joint_data.velocity)
+            else:
+                all_zeros = True
+            if not all_zeros:
+                lens = len(joint_data.velocity)
+                if lens == 7:
+                    vel_all = clip(round(joint_data.velocity[6]), 1, 100)
+                    self.get_logger().info(f"vel_all: {vel_all}")
+                    self.slave_piper.MotionCtrl_2(0x01, 0x01, vel_all)
+
+                else:
+                    self.slave_piper.MotionCtrl_2(0x01, 0x01, 20)
+            else:
+                self.slave_piper.MotionCtrl_2(0x01, 0x01, 20)
+
+            self.slave_piper.JointCtrl(joint_0, joint_1, joint_2,
+                                        joint_3, joint_4, joint_5)
+
+            if self.gripper_exist:
+                if len(joint_data.effort) >= 7:
+                    gripper_effort = clip(joint_data.effort[6], 0.5, 3)
+                    self.get_logger().info(f"gripper_effort: {gripper_effort}")
+                    if not math.isnan(gripper_effort):
+                        gripper_effort = round(gripper_effort * 1000)
+                    else :
+                        self.get_logger().warning("Gripper effort is NaN, using default value.")
+                        gripper_effort = 0
+                    self.slave_piper.GripperCtrl(abs(joint_6), gripper_effort, 0x01, 0)
+                else:
+                    self.slave_piper.GripperCtrl(abs(joint_6), 1000, 0x01, 0)
+
+    def Slave_enable_callback(self,enable_flag: Bool):
+        """
+        Callback function for enabling the robotic arm
+            Args:
+                enable_flag (): Boolean flag
+        """
+        self.get_logger().info(f"Received enable flag:")
+        self.get_logger().info(f"enable_flag: {enable_flag.data}")
+
+        if enable_flag.data:
+            self.__enable_flag = True
+            self.slave_piper.EnableArm(7)
+            if self.gripper_exist:
+                self.slave_piper.GripperCtrl(0, 1000, 0x01, 0)
+
+        else:
+            self.__enable_flag = False
+            self.slave_piper.DisableArm(7)
+            if self.gripper_exist:
+                self.slave_piper.GripperCtrl(0, 1000, 0x00, 0)
 
 
 def main(args = None):

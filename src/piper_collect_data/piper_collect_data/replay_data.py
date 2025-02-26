@@ -36,7 +36,13 @@ class RosOperator(Node):
         self.joint_state_msg.name=['joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
         self.twist_msg = Twist()
         if args.only_pub_master:
-            self.last_action = [1.784,1.259,-0.948,0.0,0.992,0.345, 0.04]
+            self.last_action = [0.6,
+                                0.3,
+                                -0.17,
+                                -1,
+                                0.15,
+                                1.34,
+                                0.04]
             self.publisher_master_only_thread = threading.Thread(target=self.publish_master_only)
             self.publisher_master_only_thread.start()
         else:
@@ -52,7 +58,6 @@ class RosOperator(Node):
                 new_actions = np.linspace(self.last_action, action, 20)
                 for act in new_actions:
                     timestamp = self.get_clock().now().to_msg()
-
                     self.joint_state_msg.header.stamp = timestamp
                     self.joint_state_msg.position = act[:].tolist()
                     self.master_arm_pub.publish(self.joint_state_msg)
