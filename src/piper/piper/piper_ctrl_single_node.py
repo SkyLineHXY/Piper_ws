@@ -31,7 +31,7 @@ class PiperRosNode(Node):
 
         self.can_port = self.get_parameter('can_port').get_parameter_value().string_value
         self.auto_enable = self.get_parameter('auto_enable').get_parameter_value().bool_value
-        self.auto_enable =True
+        # self.auto_enable =True
         self.gripper_exist = self.get_parameter('gripper_exist').get_parameter_value().bool_value
         self.rviz_ctrl_flag = self.get_parameter('rviz_ctrl_flag').get_parameter_value().bool_value
 
