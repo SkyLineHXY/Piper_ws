@@ -13,8 +13,17 @@ from sensor_msgs.msg import JointState
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import sys
-import cv2
-
+from pynput import keyboard
+import queue
+import threading
+key_event_queue = queue.Queue()
+def on_press_terminal(key):
+    """键盘事件处理函数，只是把按键存入队列"""
+    try:
+        if key.char in ['c','x','s','n']:  # 只处理有效按键
+            key_event_queue.put(key.char)
+    except AttributeError:
+        pass
 def save_data(args, timesteps, actions, dataset_path):
     # 数据字典
     data_size = len(actions)
@@ -48,7 +57,7 @@ def save_data(args, timesteps, actions, dataset_path):
         for cam_name in args.camera_names:
 
             # print()
-            data_dict[f'/observations/images/{cam_name}'].append(ts.observation['images'])
+            data_dict[f'/observations/images/{cam_name}'].append(ts.observation['images'][cam_name])
             if args.use_depth_image:
                 data_dict[f'/observations/images_depth/{cam_name}'].append(ts.observation['images_depth'][cam_name])
     t0 = time.time()
@@ -59,7 +68,7 @@ def save_data(args, timesteps, actions, dataset_path):
         # 2 图像是否压缩
         root.attrs['sim'] = False
         root.attrs['compress'] = False
-
+        root.attrs['data_size'] = data_size
         obs = root.create_group('observations')
         image = obs.create_group('images')
         for cam_name in args.camera_names:
@@ -89,37 +98,101 @@ class RosOperator(Node):
         self.bridge = CvBridge()
         self.slave_arm_deque = deque(maxlen = 2000)
         self.master_arm_deque = deque(maxlen = 2000)
-        self.img_deque = deque(maxlen = 2000)
-        self.img_depth_deque = deque(maxlen = 2000)
+        self.img_front_deque = deque(maxlen = 2000)
+        self.img_front_depth_deque = deque(maxlen = 2000)
+        self.img_wrist_deque = deque(maxlen = 2000)
+        self.img_wrist_depth_deque = deque(maxlen = 2000)
         self.args=args
 
-        self.img_sub = self.create_subscription(Image,args.img_topic,
-                                                self.img_callback,10)
+        self.img_front_sub = self.create_subscription(Image,args.img_front_topic,
+                                                self.img_front_callback,10)
+        self.img_wrist_sub =self.create_subscription(Image,args.img_wrist_topic,
+                                                     self.img_wrist_callback,10)
         if args.use_depth_image:
-            self.img_depth_sub = self.create_subscription(Image,args.img_depth_topic,
-                                                          self.img_depth_callback,10)
-
+            self.img_front_depth_sub = self.create_subscription(Image,args.img_front_depth_topic,
+                                                          self.img_front_depth_callback,10)
+            self.img_wrist_depth_sub = self.create_subscription(Image,args.img_wrist_depth_topic,
+                                                          self.img_wrist_depth_callback,10)
         self.master_arm_sub = self.create_subscription(JointState,args.master_arm_topic,
                                                         self.master_arm_callback,10)
         self.slave_arm_sub = self.create_subscription(JointState,args.slave_arm_topic,
                                                       self.slave_arm_callback,10)
+        self.key = None # 键盘输入
+        self.stop_collecting = False
+        self.terminal_thread = threading.Thread(target=self.terminal_thread)
+        self.terminal_thread.start()
+        self.process_collecting_thread = threading.Thread(target=self.process_collecting_thread)
+        self.process_collecting_thread.start()
+        self.timesteps, self.actions = [], []
+        self.collecting_data = False
+
+        # self.get_logger().warn(f'Press "c" to start collecting data')
+        print(f'\033[32m　Collection Robot data thread. \033[0m')
+        print(f'\033[32m　Press "c" to start collecting data. \033[0m')
+        print(f'\033[32m　Press "x" to stop collecting data. \033[0m')
+        print(f'\033[32m　Press "s" to save collecting data. \033[0m')
+    def process_collecting_thread(self):
+        rate =self.create_rate(100)
+        while rclpy.ok() and not self.stop_collecting:
+            if self.key == 'c' and self.collecting_data ==True:
+                self.timesteps, self.actions = self.process()
+            else :
+                continue
+            rate.sleep()
+        # pass
+    def terminal_thread(self):
+        listener = keyboard.Listener(on_press=on_press_terminal)
+        listener.start()
+        episode_idx = self.args.episode_idx
+        terminate_program = False  # 退出程序标志
+
+        while rclpy.ok() and not terminate_program:
+            try:
+                self.key = key_event_queue.get(timeout=0.1)
+                if self.key == 'c' and not self.collecting_data:
+                    self.get_logger().info(f'Start collecting data for episode {episode_idx}')
+                    self.collecting_data = True
+                    # timesteps, actions = self.process()
+                elif self.key == 's' and self.collecting_data:
+                    self.get_logger().info(f'To Save collecting data to file for episode {episode_idx}')
+                    self.collecting_data = False
+                    dataset_dir = os.path.join(self.args.dataset_dir, self.args.task_name)
+                    if not os.path.exists(dataset_dir):
+                        os.makedirs(dataset_dir)
+                    dataset_path = os.path.join(dataset_dir, f"episode_{episode_idx}")
+                    save_data(self.args, self.timesteps, self.actions, dataset_path)
+                    episode_idx += 1
+                # elif key == 'x':
+            except queue.Empty:
+                pass
 
     def get_frame(self):
-        if len(self.img_deque) == 0 or (self.args.use_depth_image and len(self.img_depth_deque) == 0):
+        if len(self.img_front_deque) == 0 or (self.args.use_depth_image and len(self.img_front_depth_deque) == 0):
             return False
-        if len(self.master_arm_deque)==0 or len(self.slave_arm_deque)==0:
+        if len(self.img_wrist_deque) == 0 or (self.args.use_depth_image and len(self.img_wrist_depth_deque) == 0):
+            return False
+        if len(self.master_arm_deque) == 0 or len(self.slave_arm_deque) == 0:
             return False
 
-        latest_img_time = self.img_deque[-1].header.stamp.sec+1e-9*self.img_deque[-1].header.stamp.nanosec
+        latest_front_img_time = self.img_front_deque[-1].header.stamp.sec+1e-9*self.img_front_deque[-1].header.stamp.nanosec
+        latest_wrist_img_time = self.img_wrist_deque[-1].header.stamp.sec + 1e-9*self.img_wrist_deque[-1].header.stamp.nanosec
         latest_master_time = self.master_arm_deque[-1].header.stamp.sec + 1e-9 * self.master_arm_deque[
             -1].header.stamp.nanosec
         latest_slave_time = self.slave_arm_deque[-1].header.stamp.sec + 1e-9 * self.slave_arm_deque[
             -1].header.stamp.nanosec
-        sync_time = min(latest_img_time, latest_master_time, latest_slave_time)
 
-        while self.img_deque and (
-            self.img_deque[0].header.stamp.sec + 1e-9 * self.img_deque[0].header.stamp.nanosec < sync_time):
-            self.img_deque.popleft()
+        sync_time = min(latest_front_img_time,
+                        latest_wrist_img_time,
+                        latest_master_time,
+                        latest_slave_time)
+
+        while self.img_front_deque and (
+            self.img_front_deque[0].header.stamp.sec + 1e-9 * self.img_front_deque[0].header.stamp.nanosec < sync_time):
+            self.img_front_deque.popleft()
+
+        while self.img_wrist_deque and (
+            self.img_wrist_deque[0].header.stamp.sec + 1e-9 * self.img_wrist_deque[0].header.stamp.nanosec < sync_time):
+            self.img_wrist_deque.popleft()
 
         while self.master_arm_deque and (
             self.master_arm_deque[0].header.stamp.sec + 1e-9 * self.master_arm_deque[0].header.stamp.nanosec < sync_time):
@@ -128,27 +201,40 @@ class RosOperator(Node):
         while self.slave_arm_deque and (
                 self.slave_arm_deque[0].header.stamp.sec + 1e-9 * self.slave_arm_deque[0].header.stamp.nanosec < sync_time):
             self.slave_arm_deque.popleft()
-        if not self.img_deque or not self.master_arm_deque or not self.slave_arm_deque:
+
+        if not self.img_wrist_deque or not self.img_front_deque or not self.master_arm_deque or not self.slave_arm_deque:
             return False
 
-        img_msg = self.img_deque.popleft()
-        img = self.bridge.imgmsg_to_cv2(img_msg,desired_encoding ='passthrough')
-        img_depth = None
+        img_front_msg = self.img_front_deque.popleft()
+        img_wrist_msg = self.img_wrist_deque.popleft()
+        img_wrist = self.bridge.imgmsg_to_cv2(img_wrist_msg,
+                                        desired_encoding ='passthrough')
+        img_front = self.bridge.imgmsg_to_cv2(img_front_msg,
+                                        desired_encoding ='passthrough')
+        img_front_depth = None
+        img_wrist_depth = None
 
-        if self.args.use_depth_image and self.img_depth_deque:
-            img_depth_msg = self.img_depth_deque.popleft()
-            img_depth = self.bridge.imgmsg_to_cv2(img_depth_msg, desired_encoding='passthrough')
+        if self.args.use_depth_image and self.img_wrist_depth_deque and self.img_front_depth_deque:
+            img_wrist_depth_msg = self.img_wrist_depth_deque.popleft()
+            img_front_depth_msg = self.img_front_depth_deque.popleft()
+            img_wrist_depth = self.bridge.imgmsg_to_cv2(img_wrist_depth_msg, desired_encoding='passthrough')
+            img_front_depth = self.bridge.imgmsg_to_cv2(img_front_depth_msg, desired_encoding='passthrough')
 
         master_arm = self.master_arm_deque.popleft()
         slave_arm = self.slave_arm_deque.popleft()
 
-        return img, img_depth, master_arm, slave_arm
+        return img_front,img_wrist,img_front_depth,img_wrist_depth, master_arm, slave_arm
 
-    def img_callback(self, msg):
-        self.img_deque.append(msg)
+    def img_front_callback(self, msg):
+        self.img_front_deque.append(msg)
 
-    def img_depth_callback(self, msg):
-        self.img_depth_deque.append(msg)
+    def img_front_depth_callback(self, msg):
+        self.img_front_depth_deque.append(msg)
+    def img_wrist_callback(self, msg):
+        self.img_wrist_deque.append(msg)
+
+    def img_wrist_depth_callback(self, msg):
+        self.img_wrist_depth_deque.append(msg)
 
     def master_arm_callback(self, msg):
         self.master_arm_deque.append(msg)
@@ -159,30 +245,46 @@ class RosOperator(Node):
     def process(self):
         timesteps = []
         actions = []
-        image =np.random.randint(0 ,255 ,size=(480 ,640 ,3) ,dtype = np.uint8)
-        image_dict = {self.args.camera_names[0]: image}
+        image_front =np.random.randint(0,255,size=(480 ,640 ,3) ,dtype = np.uint8)
+        image_wrist =np.random.randint(0,255,size=(480 ,640 ,3) ,dtype = np.uint8)
+
+        image_front_depth =np.random.random(size=(480 ,640 ,1))
+        image_wrist_depth =np.random.random(size=(480 ,640 ,1))
+
+        image_dict = {self.args.camera_names[0]: image_front,
+                      self.args.camera_names[1]: image_wrist}
+        image_depth_dict = {self.args.camera_names[0]: image_front_depth,
+                            self.args.camera_names[1]: image_wrist_depth}
         count = 0
         rate =self.create_rate(self.args.frame_rate)
         print_flag = True
+
+        # listener_process = keyboard.Listener(on_press=on_process_key_stop_collect)
+        # listener_process.start()
 
         while rclpy.ok() and (count < self.args.max_timesteps + 1):
             result = self.get_frame()
             if not result:
                 if print_flag:
-                    print("syn fail")
-                    print_flag = False
+                    self.get_logger().error('syn fail')
+                    # print_flag = False
                 rate.sleep()
                 continue
+
+            # self.get_logger().info('syn success')
             print_flag = True
             count+=1
-            img,img_depth,master_arm,slave_arm = result
+            img_front,img_wrist,img_front_depth,img_wrist_depth,master_arm,slave_arm = result
 
-            image_dict[self.args.camera_names[0]] = img
-
+            image_dict[self.args.camera_names[0]] = img_front
+            image_dict[self.args.camera_names[1]] = img_wrist
+            image_depth_dict[self.args.camera_names[0]] = img_front_depth
             obs = collections.OrderedDict()
-            obs['images'] = img
+            obs['images'] = {self.args.camera_names[0]: image_dict[self.args.camera_names[0]],
+                             self.args.camera_names[1]: image_dict[self.args.camera_names[1]]}
             if self.args.use_depth_image:
-                obs['images_depth'] = {self.args.camera_names[0]: img_depth}
+                obs['images_depth'] = {self.args.camera_names[0]: image_depth_dict[self.args.camera_names[0]],
+                                       self.args.camera_names[1]: image_depth_dict[self.args.camera_name[1]]}
 
             obs['qpos'] = np.array(slave_arm.position)
             obs['qvel'] = np.array(slave_arm.velocity)
@@ -206,12 +308,16 @@ class RosOperator(Node):
             action =np.array(master_arm.position)
             actions.append(action)
             timesteps.append(ts)
-
-            print('Frame data:',count)
+            # print('Frame data:',count)
             rate.sleep()
+            if self.key == 'x':
+                # self.stop_collecting = False
+                self.get_logger().info('Stop collecting data,frame_index:{}'.format(count-1))
+                break
         print("len(timesteps): ", len(timesteps))
         print("len(actions)  : ", len(actions))
         return timesteps,actions
+
 def get_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_dir', action='store', type=str, help='Dataset_dir.',
@@ -219,17 +325,20 @@ def get_arguments():
     parser.add_argument('--task_name', action='store', type=str, help='Task name.',
                         default="piper_aloha", required=False)
     parser.add_argument('--episode_idx', action='store', type=int, help='Episode index.',
-                        default=2, required=False)
+                        default=10, required=False)
     parser.add_argument('--max_timesteps', action='store', type=int, help='Max_timesteps.',
-                        default=300, required=False)
-
+                        default=1000, required=False)
     parser.add_argument('--camera_names', action='store', type=str, help='camera_names',
-                        default=['cam_realsense'], required=False)
-    parser.add_argument('--img_topic', action='store', type=str, help='img_topic',
-                        default='/camera/camera/color/image_raw', required=False)
-    parser.add_argument('--img_depth_topic', action='store', type=str, help='img_depth_topic',
-                        default='/camera/camera/depth/image_rect_raw', required=False)
-    parser.add_argument('--master_arm_topic', action = 'store',type=str,default='/joint_states', required=False)
+                        default=['cam_front','cam_wrist'], required=False)
+    parser.add_argument('--img_front_topic', action='store', type=str, help='img_front_topic',
+                        default='/front_camera/front_camera/color/image_raw', required=False)
+    parser.add_argument('--img_wrist_topic',action='store',type=str,help='img_wrist_topic',
+                        default='/wrist_camera/wrist_camera/color/image_raw', required=False)
+    parser.add_argument('--img_front_depth_topic', action='store', type=str, help='img_front_depth_topic',
+                        default='/front_camera/front_camera/depth/image_rect_raw', required=False)
+    parser.add_argument('--img_wrist_depth_topic',action='store',type=str,help='img_wrist_depth_topic',
+                        default='/wrist_camera/wrist_camera/depth/image_rect_raw',required=False)
+    parser.add_argument('--master_arm_topic', action = 'store',type=str,default='/master_joint_states', required=False)
     parser.add_argument('--slave_arm_topic', action = 'store',type=str,default='/joint_states', required=False)
 
     parser.add_argument('--use_depth_image', action='store', type=bool, help='use_depth_image',
@@ -246,29 +355,14 @@ def main():
     args = get_arguments()
 
     ros_operator = RosOperator(args)
-    executor = rclpy.executors.SingleThreadedExecutor()
-    executor.add_node(ros_operator)
+    listener = keyboard.Listener(on_press=on_press_terminal)
 
-    try:
-        def spin_thread():
-            executor.spin()
+    rclpy.spin(ros_operator)
+    ros_operator.destroy_node()
+    listener.stop()
+    listener.join()
+    rclpy.shutdown()
 
-        import threading
-        thread =threading.Thread(target=spin_thread)
-        thread.start()
-        
-        timesteps,actions = ros_operator.process()
-        
-        dataset_dir = os.path.join(args.dataset_dir, args.task_name)
-        if not os.path.exists(dataset_dir):
-            os.makedirs(dataset_dir)
-        dataset_path = os.path.join(dataset_dir, f"episode_{args.episode_idx}")
-        save_data(args,timesteps,actions,dataset_path)
-
-    finally:
-        executor.shutdown()
-        ros_operator.destroy_node()
-        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

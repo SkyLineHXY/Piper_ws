@@ -22,7 +22,7 @@ class RosOperator(Node):
         self.args = args
         self.bridge = CvBridge()
 
-        self.img_pub = self.create_publisher(Image, self.args.img_topic, 10)
+        # self.img_pub = self.create_publisher(Image, self.args.img_topic, 10)
         self.slave_arm_pub =self.create_publisher(JointState, args.slave_arm_topic, 10)
         self.master_arm_pub =self.create_publisher(JointState, args.master_arm_topic,10)
 
@@ -30,25 +30,28 @@ class RosOperator(Node):
         dataset_name = f'episode_{args.episode_idx}.hdf5'
         dataset_path = os.path.join(dataset_dir, dataset_name)
 
-        self.qposs, self.qvels, self.efforts, self.actions, self.image_dicts = self.load_hdf5(dataset_path)
+        self.qpos, self.qvels, self.efforts, self.actions, self.image_dicts = self.load_hdf5(dataset_path)
 
-        self.joint_state_msg = JointState()
-        self.joint_state_msg.name=['joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
-        self.twist_msg = Twist()
-        if args.only_pub_master:
-            self.last_action = [0.6,
-                                0.3,
-                                -0.17,
-                                -1,
-                                0.15,
-                                1.34,
-                                0.04]
-            self.publisher_master_only_thread = threading.Thread(target=self.publish_master_only)
-            self.publisher_master_only_thread.start()
-        else:
-            self.current_idx = 0
-            self.publisher_all_thread = threading.Thread(target=self.publish_all)
-            self.publisher_all_thread.start()
+        self.plot_qpos_action(self.qpos,self.actions,output_dir= os.path.join(dataset_dir,'output'))
+
+        self.stitch_and_save_videos(image_dict=self.image_dicts,output_path=os.path.join(dataset_dir,'output',f'stitched_video_episode{self.args.episode_idx}.mp4'))
+        # self.joint_state_msg = JointState()
+        # self.joint_state_msg.name=['joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        # self.twist_msg = Twist()
+        # if args.only_pub_master:
+        #     self.last_action = [0.6,
+        #                         0.3,
+        #                         -0.17,
+        #                         -1,
+        #                         0.15,
+        #                         1.34,
+        #                         0.04]
+        #     self.publisher_master_only_thread = threading.Thread(target=self.publish_master_only)
+        #     self.publisher_master_only_thread.start()
+        # else:
+        #     self.current_idx = 0
+        #     self.publisher_all_thread = threading.Thread(target=self.publish_all)
+        #     self.publisher_all_thread.start()
 
     def publish_master_only(self):
         rate = self.create_rate(self.args.frame_rate)
@@ -133,6 +136,64 @@ class RosOperator(Node):
 
         return qpos, qvel, effort, action, image_dict
 
+
+    def stitch_and_save_videos(self,image_dict, output_path='stitched_video.mp4'):
+        """
+            读取 image_dict 并拼接两个摄像头的视频流，保存为单个视频
+            :param image_dict: 包含两个摄像头帧的字典 {cam_name: [frames]}
+            :param output_path: 输出视频路径
+        """
+        cam_names = list(image_dict.keys())
+        if len(cam_names) < 1:
+            raise ValueError("image_dict 必须包含至少一个摄像头的视频流")
+        frames_list = [image_dict[cam] for cam in cam_names]
+        heights = [frames[0].shape[0] for frames in frames_list]
+        widths = [frames[0].shape[1] for frames in frames_list]
+        stitched_height = max(heights)
+        stitched_width = sum(widths)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, 30, (stitched_width, stitched_height))
+        for frame_set in zip(*frames_list):
+            stitched_frame = np.zeros((stitched_height, stitched_width, 3), dtype=np.uint8)
+            x_offset = 0
+            for i, frame in enumerate(frame_set):
+                h, w, _ = frame.shape
+                stitched_frame[:h, x_offset:x_offset + w] = frame
+                x_offset += w
+            out.write(stitched_frame)
+        out.release()
+        self.get_logger().info(f"拼接视频已保存到 {output_path}")
+
+
+    def plot_qpos_action(self,qpos,action,output_dir=None):
+        """
+        绘制 qpos 和 action 曲线
+        :param qpos: 关节位置数据 (numpy 数组，形状: [时间步, 关节数])
+        :param action: 机器人执行的动作 (numpy 数组，形状: [时间步, 关节数])
+        """
+        timesteps = range(qpos.shape[0])  # 获取时间步
+
+        fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+        # 绘制 qpos 曲线
+        for i in range(qpos.shape[1]):
+            axs[0].plot(timesteps, qpos[:, i], label=f'Joint {i + 1}')
+        axs[0].set_title('Joint Position (qpos) Over Time')
+        axs[0].set_xlabel('Timestep')
+        axs[0].set_ylabel('Position')
+        axs[0].legend()
+        axs[0].grid(True)
+        # 绘制 action 曲线
+        for i in range(action.shape[1]):
+            axs[1].plot(timesteps, action[:, i], label=f'Action {i + 1}')
+        axs[1].set_title('Action Over Time')
+        axs[1].set_xlabel('Timestep')
+        axs[1].set_ylabel('Action Value')
+        axs[1].legend()
+        axs[1].grid(True)
+        plt.tight_layout()
+        plt.show()
+        if output_dir is not None:
+            fig.savefig(os.path.join(output_dir, f'qpos_action_{self.args.episode_idx}.png'))
 def get_arguments():
 
     parser = argparse.ArgumentParser()
@@ -141,10 +202,10 @@ def get_arguments():
     parser.add_argument('--task_name',action='store', type=str,help='Task name.',
                         default="piper_aloha", required=False)
     parser.add_argument('--episode_idx', action='store', type=int,
-                        help='Episode index.',default=2, required=False)
+                        help='Episode index.',default=10, required=False)
     parser.add_argument('--camera_names', action='store', type=str, help='camera_names',required=False,
                         # default=['cam_high', 'cam_left_wrist', 'cam_right_wrist'])
-                        default=['cam_realsense'])
+                        default=['cam_front','cam_wrist'])
     # parser.add_argument('--img_front_topic', action='store', type=str, help='img_front_topic',
     #                     default='/camera_f/color/image_raw', required=False)
     # parser.add_argument('--img_left_topic', action='store', type=str, help='img_left_topic',
@@ -153,6 +214,14 @@ def get_arguments():
     #                     default='/camera_r/color/image_raw', required=False)
     parser.add_argument('--img_topic', action='store', type=str, help='img_topic',
                         default='/camera/camera/color/image_raw', required=False)
+    parser.add_argument('--img_front_topic', action='store', type=str, help='img_front_topic',
+                        default='/front_camera/front_camera/color/image_raw', required=False)
+    parser.add_argument('--img_wrist_topic',action='store',type=str,help='img_wrist_topic',
+                        default='/wrist_camera/wrist_camera/color/image_raw', required=False)
+    parser.add_argument('--img_front_depth_topic', action='store', type=str, help='img_front_depth_topic',
+                        default='/front_camera/front_camera/depth/image_rect_raw', required=False)
+    parser.add_argument('--img_wrist_depth_topic',action='store',type=str,help='img_wrist_depth_topic',
+                        default='/wrist_camera/wrist_camera/depth/image_rect_raw',required=False)
     # parser.add_argument('--master_arm_left_topic', action='store', type=str, help='master_arm_left_topic',
     #                     default='/master/joint_left', required=False)
     # parser.add_argument('--master_arm_right_topic', action='store', type=str, help='master_arm_right_topic',

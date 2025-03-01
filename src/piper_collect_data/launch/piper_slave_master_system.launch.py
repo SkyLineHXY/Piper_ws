@@ -65,10 +65,53 @@ def generate_launch_description():
         # ]
     )
 
+    #启动realsense2_camera
+    front_realsense_num = "148522072680"
+    wrist_realsense_num = "241222073777"
+
+    front_cam_node =Node(
+        package='realsense2_camera',
+        executable='realsense2_camera_node',
+        namespace='front_camera',
+        name=f'front_camera',
+        output='screen',
+        parameters=[{'serial_no': front_realsense_num},
+                     {"enable_color": True},
+                    {"enable_depth": True},
+                    {"enable_infra1": False},
+                    {"enable_infra2": False},
+                    {"enable_pointcloud": False},
+                    {"rgb_camera_fps": 30}
+                    ]
+    )
+    wrist_cam_node = Node(
+        package='realsense2_camera',
+        executable='realsense2_camera_node',
+        namespace='wrist_camera',
+        name=f'wrist_camera',
+        output='screen',
+        parameters=[{'serial_no': wrist_realsense_num},
+                    {"enable_color": True},
+                    {"enable_depth": True},
+                    {"enable_infra1": False},
+                    {"enable_infra2": False},
+                    {"enable_pointcloud": False},
+                    {"rgb_camera_fps": 30}
+                    ]
+    )
+
+    ##遥操作控制节点
+    slave_arm_control_node =Node(
+        package='piper_collect_data',
+        executable ='slave_arm_control_node',
+        output='screen'
+    )
+    #初始化摄像头与机械臂的相对坐标信息
+    # eyehand_publish_launch_file = os.path.join(get_package_share_directory('easy_handeye2'),
+    #                                            'launch','publish.launch.py')
     return LaunchDescription([
-        # realsense_launch,
-        # eyehand_publish_launch,
-        # piper_grasp_predict_Node,
+        wrist_cam_node,
+        front_cam_node,
         master_can_port_arg,
         slave_can_port_arg,
         auto_enable_arg,
@@ -76,5 +119,5 @@ def generate_launch_description():
         rviz_ctrl_flag_arg,
         gripper_exist_arg,
         piper_ctrl_node,
-        # grasp_link6_transformPub_Node
+        slave_arm_control_node
     ])

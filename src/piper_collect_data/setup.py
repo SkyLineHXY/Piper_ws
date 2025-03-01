@@ -23,6 +23,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'collect_data_node = piper_collect_data.collect_data:main',
             'slave_arm_control_node = piper_collect_data.slave_arm_control:main'
         ],
     },
