@@ -16,8 +16,8 @@ from piper_msgs.srv import Enable
 from geometry_msgs.msg import Pose
 from scipy.spatial.transform import Rotation as R  # For Euler angle to quaternion conversion
 from numpy import clip
-
-
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 class PiperRosNode(Node):
 
     def __init__(self) -> None:
@@ -63,7 +63,8 @@ class PiperRosNode(Node):
         self.slave_joint_states.position = [0.0] * 8
         self.slave_joint_states.velocity = [0.0] * 8
         self.slave_joint_states.effort = [0.0] * 8
-
+        self.slave_endpos_msg = Pose()
+        self.master_endpos_msg = Pose()
         # Enable flag
         self.__enable_flag = False
         # Create piper class and open CAN interface
@@ -71,18 +72,36 @@ class PiperRosNode(Node):
         self.slave_piper = C_PiperInterface(can_name=self.slave_can_port)
         self.master_piper.ConnectPort()
         self.slave_piper.ConnectPort()
+        self.slave_arm_status = PiperStatusMsg()
+        self.master_arm_status = PiperStatusMsg()
 
+        self.pos_callback_group = MutuallyExclusiveCallbackGroup()
+        self.joint_callback_group = MutuallyExclusiveCallbackGroup()
+        self.enable_callback_group = MutuallyExclusiveCallbackGroup()
         # Subscription
-        self.create_subscription(PosCmd, 'slave_piper_pos_ctrl', self.Slave_pos_callback, 1)
-        self.create_subscription(JointState, 'slave_piper_joint_ctrl', self.Slave_joint_callback, 1)
-        self.create_subscription(Bool, 'slave_enable_flag', self.Slave_enable_callback, 1)
+        self.create_subscription(PosCmd, 'slave_piper_pos_ctrl', self.Slave_pos_callback, 10,
+                                 callback_group=self.pos_callback_group)
+        self.create_subscription(JointState, 'slave_piper_joint_ctrl', self.Slave_joint_callback, 10,
+                                 callback_group=self.joint_callback_group)
+        self.create_subscription(Bool, 'slave_enable_flag', self.Slave_enable_callback, 10,
+                                 callback_group=self.enable_callback_group)
 
         self.publisher_thread = threading.Thread(target=self.publish_thread)
+        self.publisher_master_thread = threading.Thread(target=self.publish_master_thread)
+        self.publisher_armstatus_thread = threading.Thread(target=self.publish_armstatus_thread)
         self.publisher_thread.start()
+        self.publisher_master_thread.start()
+        self.publisher_armstatus_thread.start()
 
     def GetEnableFlag(self):
         return self.__enable_flag
 
+    def publish_master_thread(self):
+        rate = self.create_rate(200)  # 200 Hz
+        while rclpy.ok():
+            if self.__enable_flag==True:
+                self.PublishMasterArmJointAndGripper()
+            rate.sleep()
     def publish_thread(self):
         rate = self.create_rate(200)  # 200 Hz
         enable_flag = False
@@ -121,61 +140,87 @@ class PiperRosNode(Node):
             if (elapsed_time_flag):
                 print("Automatic enable timeout, exiting program")
                 exit(0)
+            # self.PublishArmState()
+            self.PublishSlaveArmJointAndGripper()
+            # self.PublishArmEndPose()
+            rate.sleep()
+    def publish_armstatus_thread(self):
+        rate = self.create_rate(10)
+        while rclpy.ok():
             self.PublishArmState()
-            self.PublishArmJointAndGripper()
-            self.PublishArmEndPose()
             rate.sleep()
     def PublishArmState(self):
-        slave_arm_status = PiperStatusMsg()
-        master_arm_status = PiperStatusMsg()
-
         #发送从臂的状态
-        slave_arm_status.ctrl_mode = self.slave_piper.GetArmStatus().arm_status.ctrl_mode
-        slave_arm_status.arm_status = self.slave_piper.GetArmStatus().arm_status.arm_status
-        slave_arm_status.mode_feedback = self.slave_piper.GetArmStatus().arm_status.mode_feed
-        slave_arm_status.teach_status = self.slave_piper.GetArmStatus().arm_status.teach_status
-        slave_arm_status.motion_status = self.slave_piper.GetArmStatus().arm_status.motion_status
-        slave_arm_status.trajectory_num = self.slave_piper.GetArmStatus().arm_status.trajectory_num
-        slave_arm_status.err_code = self.slave_piper.GetArmStatus().arm_status.err_code
-        slave_arm_status.joint_1_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_1_angle_limit
-        slave_arm_status.joint_2_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_2_angle_limit
-        slave_arm_status.joint_3_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_3_angle_limit
-        slave_arm_status.joint_4_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_4_angle_limit
-        slave_arm_status.joint_5_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_5_angle_limit
-        slave_arm_status.joint_6_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_6_angle_limit
-        slave_arm_status.communication_status_joint_1 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_1
-        slave_arm_status.communication_status_joint_2 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_2
-        slave_arm_status.communication_status_joint_3 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_3
-        slave_arm_status.communication_status_joint_4 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_4
-        slave_arm_status.communication_status_joint_5 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_5
-        slave_arm_status.communication_status_joint_6 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_6
+        self.slave_arm_status.ctrl_mode = self.slave_piper.GetArmStatus().arm_status.ctrl_mode
+        self.slave_arm_status.arm_status = self.slave_piper.GetArmStatus().arm_status.arm_status
+        self.slave_arm_status.mode_feedback = self.slave_piper.GetArmStatus().arm_status.mode_feed
+        self.slave_arm_status.teach_status = self.slave_piper.GetArmStatus().arm_status.teach_status
+        self.slave_arm_status.motion_status = self.slave_piper.GetArmStatus().arm_status.motion_status
+        self.slave_arm_status.trajectory_num = self.slave_piper.GetArmStatus().arm_status.trajectory_num
+        self.slave_arm_status.err_code = self.slave_piper.GetArmStatus().arm_status.err_code
+        self.slave_arm_status.joint_1_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_1_angle_limit
+        self.slave_arm_status.joint_2_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_2_angle_limit
+        self.slave_arm_status.joint_3_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_3_angle_limit
+        self.slave_arm_status.joint_4_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_4_angle_limit
+        self.slave_arm_status.joint_5_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_5_angle_limit
+        self.slave_arm_status.joint_6_angle_limit = self.slave_piper.GetArmStatus().arm_status.err_status.joint_6_angle_limit
+        self.slave_arm_status.communication_status_joint_1 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_1
+        self.slave_arm_status.communication_status_joint_2 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_2
+        self.slave_arm_status.communication_status_joint_3 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_3
+        self.slave_arm_status.communication_status_joint_4 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_4
+        self.slave_arm_status.communication_status_joint_5 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_5
+        self.slave_arm_status.communication_status_joint_6 = self.slave_piper.GetArmStatus().arm_status.err_status.communication_status_joint_6
 
-        self.slave_arm_status_pub.publish(slave_arm_status)
+        self.slave_arm_status_pub.publish(self.slave_arm_status)
 
         #发送主臂的状态
-        master_arm_status.ctrl_mode = self.master_piper.GetArmStatus().arm_status.ctrl_mode
-        master_arm_status.arm_status = self.master_piper.GetArmStatus().arm_status.arm_status
-        master_arm_status.mode_feedback = self.master_piper.GetArmStatus().arm_status.mode_feed
-        master_arm_status.teach_status = self.master_piper.GetArmStatus().arm_status.teach_status
-        master_arm_status.motion_status = self.master_piper.GetArmStatus().arm_status.motion_status
-        master_arm_status.trajectory_num = self.master_piper.GetArmStatus().arm_status.trajectory_num
-        master_arm_status.err_code = self.master_piper.GetArmStatus().arm_status.err_code
-        master_arm_status.joint_1_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_1_angle_limit
-        master_arm_status.joint_2_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_2_angle_limit
-        master_arm_status.joint_3_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_3_angle_limit
-        master_arm_status.joint_4_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_4_angle_limit
-        master_arm_status.joint_5_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_5_angle_limit
-        master_arm_status.joint_6_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_6_angle_limit
-        master_arm_status.communication_status_joint_1 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_1
-        master_arm_status.communication_status_joint_2 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_2
-        master_arm_status.communication_status_joint_3 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_3
-        master_arm_status.communication_status_joint_4 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_4
-        master_arm_status.communication_status_joint_5 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_5
-        master_arm_status.communication_status_joint_6 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_6
+        self.master_arm_status.ctrl_mode = self.master_piper.GetArmStatus().arm_status.ctrl_mode
+        self.master_arm_status.arm_status = self.master_piper.GetArmStatus().arm_status.arm_status
+        self.master_arm_status.mode_feedback = self.master_piper.GetArmStatus().arm_status.mode_feed
+        self.master_arm_status.teach_status = self.master_piper.GetArmStatus().arm_status.teach_status
+        self.master_arm_status.motion_status = self.master_piper.GetArmStatus().arm_status.motion_status
+        self.master_arm_status.trajectory_num = self.master_piper.GetArmStatus().arm_status.trajectory_num
+        self.master_arm_status.err_code = self.master_piper.GetArmStatus().arm_status.err_code
+        self.master_arm_status.joint_1_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_1_angle_limit
+        self.master_arm_status.joint_2_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_2_angle_limit
+        self.master_arm_status.joint_3_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_3_angle_limit
+        self.master_arm_status.joint_4_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_4_angle_limit
+        self.master_arm_status.joint_5_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_5_angle_limit
+        self.master_arm_status.joint_6_angle_limit = self.master_piper.GetArmStatus().arm_status.err_status.joint_6_angle_limit
+        self.master_arm_status.communication_status_joint_1 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_1
+        self.master_arm_status.communication_status_joint_2 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_2
+        self.master_arm_status.communication_status_joint_3 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_3
+        self.master_arm_status.communication_status_joint_4 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_4
+        self.master_arm_status.communication_status_joint_5 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_5
+        self.master_arm_status.communication_status_joint_6 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_6
 
-        self.master_arm_status_pub.publish(master_arm_status)
+        self.master_arm_status_pub.publish(self.master_arm_status)
 
-    def PublishArmJointAndGripper(self):
+    def PublishMasterArmJointAndGripper(self):
+        # master arm joint states publisher
+        self.master_joint_states.header.stamp = self.get_clock().now().to_msg()
+        joint_0: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_1 / 1000) * 0.017444
+        joint_1: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_2 / 1000) * 0.017444
+        joint_2: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_3 / 1000) * 0.017444
+        joint_3: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_4 / 1000) * 0.017444
+        joint_4: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_5 / 1000) * 0.017444
+        joint_5: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_6 / 1000) * 0.017444
+        joint_6: float = self.master_piper.GetArmGripperMsgs().gripper_state.grippers_angle / 1000000
+
+        vel_0: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_1.motor_speed / 1000
+        vel_1: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_2.motor_speed / 1000
+        vel_2: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_3.motor_speed / 1000
+        vel_3: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_4.motor_speed / 1000
+        vel_4: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_5.motor_speed / 1000
+        vel_5: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_6.motor_speed / 1000
+        effort_6: float = self.master_piper.GetArmGripperMsgs().gripper_state.grippers_effort / 1000
+        self.master_joint_states.position = [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6,
+                                             0.0]  # Example values
+        self.master_joint_states.velocity = [vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0,
+                                             0.0]  # Example values
+        self.master_joint_states.effort = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, effort_6, 0.0]
+        self.master_joint_pub.publish(self.master_joint_states)
+    def PublishSlaveArmJointAndGripper(self):
         # slave arm joint states publisher
         self.slave_joint_states.header.stamp = self.get_clock().now().to_msg()
         joint_0: float = (self.slave_piper.GetArmJointMsgs().joint_state.joint_1 / 1000) * 0.017444
@@ -195,39 +240,33 @@ class PiperRosNode(Node):
         self.slave_joint_states.position = [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6,0.0]  # Example values
         self.slave_joint_states.velocity = [vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0,0.0]  # Example values
         self.slave_joint_states.effort = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, effort_6,0.0]
-
         self.slave_joint_pub.publish(self.slave_joint_states)
-
-        #master arm joint states publisher
-        self.master_joint_states.header.stamp = self.get_clock().now().to_msg()
-        joint_0: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_1 / 1000) * 0.017444
-        joint_1: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_2 / 1000) * 0.017444
-        joint_2: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_3 / 1000) * 0.017444
-        joint_3: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_4 / 1000) * 0.017444
-        joint_4: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_5 / 1000) * 0.017444
-        joint_5: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_6 / 1000) * 0.017444
-        joint_6: float = self.master_piper.GetArmGripperMsgs().gripper_state.grippers_angle / 1000000
-
-        vel_0: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_1.motor_speed / 1000
-        vel_1: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_2.motor_speed / 1000
-        vel_2: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_3.motor_speed / 1000
-        vel_3: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_4.motor_speed / 1000
-        vel_4: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_5.motor_speed / 1000
-        vel_5: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_6.motor_speed / 1000
-        effort_6: float = self.master_piper.GetArmGripperMsgs().gripper_state.grippers_effort / 1000
-        self.master_joint_states.position = [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6,0.0]  # Example values
-        self.master_joint_states.velocity = [vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0,0.0]  # Example values
-        self.master_joint_states.effort = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, effort_6,0.0]
-        self.master_joint_pub.publish(self.master_joint_states)
+        # self.master_joint_states.header.stamp = self.get_clock().now().to_msg()
+        # joint_0: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_1 / 1000) * 0.017444
+        # joint_1: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_2 / 1000) * 0.017444
+        # joint_2: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_3 / 1000) * 0.017444
+        # joint_3: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_4 / 1000) * 0.017444
+        # joint_4: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_5 / 1000) * 0.017444
+        # joint_5: float = (self.master_piper.GetArmJointMsgs().joint_state.joint_6 / 1000) * 0.017444
+        # joint_6: float = self.master_piper.GetArmGripperMsgs().gripper_state.grippers_angle / 1000000
+        #
+        # vel_0: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_1.motor_speed / 1000
+        # vel_1: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_2.motor_speed / 1000
+        # vel_2: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_3.motor_speed / 1000
+        # vel_3: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_4.motor_speed / 1000
+        # vel_4: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_5.motor_speed / 1000
+        # vel_5: float = self.master_piper.GetArmHighSpdInfoMsgs().motor_6.motor_speed / 1000
+        # effort_6: float = self.master_piper.GetArmGripperMsgs().gripper_state.grippers_effort / 1000
+        # self.master_joint_states.position = [joint_0, joint_1, joint_2, joint_3, joint_4, joint_5, joint_6,0.0]  # Example values
+        # self.master_joint_states.velocity = [vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0,0.0]  # Example values
+        # self.master_joint_states.effort = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, effort_6,0.0]
+        # self.master_joint_pub.publish(self.master_joint_states)
 
     def PublishArmEndPose(self):
-        slave_endpos_msg = Pose()
-        master_endpos_msg = Pose()
-
         # slave arm end pose publisher
-        slave_endpos_msg.position.x = self.slave_piper.GetArmEndPoseMsgs().end_pose.X_axis / 1000000
-        slave_endpos_msg.position.y = self.slave_piper.GetArmEndPoseMsgs().end_pose.Y_axis / 1000000
-        slave_endpos_msg.position.z = self.slave_piper.GetArmEndPoseMsgs().end_pose.Z_axis / 1000000
+        self.slave_endpos_msg.position.x = self.slave_piper.GetArmEndPoseMsgs().end_pose.X_axis / 1000000
+        self.slave_endpos_msg.position.y = self.slave_piper.GetArmEndPoseMsgs().end_pose.Y_axis / 1000000
+        self.slave_endpos_msg.position.z = self.slave_piper.GetArmEndPoseMsgs().end_pose.Z_axis / 1000000
         roll = self.slave_piper.GetArmEndPoseMsgs().end_pose.RX_axis / 1000
         pitch = self.slave_piper.GetArmEndPoseMsgs().end_pose.RY_axis / 1000
         yaw = self.slave_piper.GetArmEndPoseMsgs().end_pose.RZ_axis / 1000
@@ -236,17 +275,17 @@ class PiperRosNode(Node):
         yaw = math.radians(yaw)
 
         quaternion = R.from_euler('xyz', [roll, pitch, yaw]).as_quat()
-        slave_endpos_msg.orientation.x = quaternion[0]
-        slave_endpos_msg.orientation.y = quaternion[1]
-        slave_endpos_msg.orientation.z = quaternion[2]
-        slave_endpos_msg.orientation.w = quaternion[3]
-        self.slave_end_pose_pub.publish(slave_endpos_msg)
+        self.slave_endpos_msg.orientation.x = quaternion[0]
+        self.slave_endpos_msg.orientation.y = quaternion[1]
+        self.slave_endpos_msg.orientation.z = quaternion[2]
+        self.slave_endpos_msg.orientation.w = quaternion[3]
+        self.slave_end_pose_pub.publish(self.slave_endpos_msg)
 
 
         # master arm end pose publisher
-        master_endpos_msg.position.x = self.master_piper.GetArmEndPoseMsgs().end_pose.X_axis / 1000000
-        master_endpos_msg.position.y = self.master_piper.GetArmEndPoseMsgs().end_pose.Y_axis / 1000000
-        master_endpos_msg.position.z = self.master_piper.GetArmEndPoseMsgs().end_pose.Z_axis / 1000000
+        self.master_endpos_msg.position.x = self.master_piper.GetArmEndPoseMsgs().end_pose.X_axis / 1000000
+        self.master_endpos_msg.position.y = self.master_piper.GetArmEndPoseMsgs().end_pose.Y_axis / 1000000
+        self.master_endpos_msg.position.z = self.master_piper.GetArmEndPoseMsgs().end_pose.Z_axis / 1000000
         roll = self.master_piper.GetArmEndPoseMsgs().end_pose.RX_axis / 1000
         pitch = self.master_piper.GetArmEndPoseMsgs().end_pose.RY_axis / 1000
         yaw = self.master_piper.GetArmEndPoseMsgs().end_pose.RZ_axis / 1000
@@ -255,12 +294,11 @@ class PiperRosNode(Node):
         yaw = math.radians(yaw)
 
         quaternion = R.from_euler('xyz', [roll, pitch, yaw]).as_quat()
-        master_endpos_msg.orientation.x = quaternion[0]
-        master_endpos_msg.orientation.y = quaternion[1]
-        master_endpos_msg.orientation.z = quaternion[2]
-        master_endpos_msg.orientation.w = quaternion[3]
-        self.master_end_pose_pub.publish(master_endpos_msg)
-
+        self.master_endpos_msg.orientation.x = quaternion[0]
+        self.master_endpos_msg.orientation.y = quaternion[1]
+        self.master_endpos_msg.orientation.z = quaternion[2]
+        self.master_endpos_msg.orientation.w = quaternion[3]
+        self.master_end_pose_pub.publish(self.master_endpos_msg)
     def Slave_pos_callback(self,pos_data):
         """
             Callback function for subscribing to the end effector pose
@@ -269,16 +307,16 @@ class PiperRosNode(Node):
                 pos_data (): The position data
         """
         factor = 180 / 3.1415926
-        self.get_logger().info(f"Received PosCmd:")
-        self.get_logger().info(f"x: {pos_data.x}")
-        self.get_logger().info(f"y: {pos_data.y}")
-        self.get_logger().info(f"z: {pos_data.z}")
-        self.get_logger().info(f"roll: {pos_data.roll}")
-        self.get_logger().info(f"pitch: {pos_data.pitch}")
-        self.get_logger().info(f"yaw: {pos_data.yaw}")
-        self.get_logger().info(f"gripper: {pos_data.gripper}")
-        self.get_logger().info(f"mode1: {pos_data.mode1}")
-        self.get_logger().info(f"mode2: {pos_data.mode2}")
+        # self.get_logger().info(f"Received PosCmd:")
+        # self.get_logger().info(f"x: {pos_data.x}")
+        # self.get_logger().info(f"y: {pos_data.y}")
+        # self.get_logger().info(f"z: {pos_data.z}")
+        # self.get_logger().info(f"roll: {pos_data.roll}")
+        # self.get_logger().info(f"pitch: {pos_data.pitch}")
+        # self.get_logger().info(f"yaw: {pos_data.yaw}")
+        # self.get_logger().info(f"gripper: {pos_data.gripper}")
+        # self.get_logger().info(f"mode1: {pos_data.mode1}")
+        # self.get_logger().info(f"mode2: {pos_data.mode2}")
         x = round(pos_data.x*1000) * 1000
         y = round(pos_data.y*1000) * 1000
         z = round(pos_data.z*1000) * 1000
@@ -299,14 +337,6 @@ class PiperRosNode(Node):
 
     def Slave_joint_callback(self, joint_data):
         factor = 57324.840764  # 1000*180/3.14
-
-        self.get_logger().info(f"Received Joint States:")
-        self.get_logger().info(f"joint_0: {joint_data.position[0]}")
-        self.get_logger().info(f"joint_1: {joint_data.position[1]}")
-        self.get_logger().info(f"joint_2: {joint_data.position[2]}")
-        self.get_logger().info(f"joint_3: {joint_data.position[3]}")
-        self.get_logger().info(f"joint_4: {joint_data.position[4]}")
-        self.get_logger().info(f"joint_5: {joint_data.position[5]}")
         joint_0 = round(joint_data.position[0]*factor)
         joint_1 = round(joint_data.position[1]*factor)
         joint_2 = round(joint_data.position[2]*factor)
@@ -314,7 +344,7 @@ class PiperRosNode(Node):
         joint_4 = round(joint_data.position[4]*factor)
         joint_5 = round(joint_data.position[5]*factor)
         if (len(joint_data.position) >= 7):
-            self.get_logger().info(f"joint_6: {joint_data.position[6]}")
+            # self.get_logger().info(f"joint_6: {joint_data.position[6]}")
             joint_6 = round(joint_data.position[6]*1000*1000)
             if(self.rviz_ctrl_flag):
                 joint_6 = joint_6 * 2
@@ -329,13 +359,13 @@ class PiperRosNode(Node):
                 lens = len(joint_data.velocity)
                 if lens == 7:
                     vel_all = clip(round(joint_data.velocity[6]), 1, 100)
-                    self.get_logger().info(f"vel_all: {vel_all}")
+                    # self.get_logger().info(f"vel_all: {vel_all}")
                     self.slave_piper.MotionCtrl_2(0x01, 0x01, vel_all)
 
                 else:
-                    self.slave_piper.MotionCtrl_2(0x01, 0x01, 20)
+                    self.slave_piper.MotionCtrl_2(0x01, 0x01, 30)
             else:
-                self.slave_piper.MotionCtrl_2(0x01, 0x01, 20)
+                self.slave_piper.MotionCtrl_2(0x01, 0x01, 30)
 
             self.slave_piper.JointCtrl(joint_0, joint_1, joint_2,
                                         joint_3, joint_4, joint_5)
@@ -343,11 +373,11 @@ class PiperRosNode(Node):
             if self.gripper_exist:
                 if len(joint_data.effort) >= 7:
                     gripper_effort = clip(joint_data.effort[6], 0.5, 3)
-                    self.get_logger().info(f"gripper_effort: {gripper_effort}")
+                    # self.get_logger().info(f"gripper_effort: {gripper_effort}")
                     if not math.isnan(gripper_effort):
                         gripper_effort = round(gripper_effort * 1000)
                     else :
-                        self.get_logger().warning("Gripper effort is NaN, using default value.")
+                        # self.get_logger().warning("Gripper effort is NaN, using default value.")
                         gripper_effort = 0
                     self.slave_piper.GripperCtrl(abs(joint_6), gripper_effort, 0x01, 0)
                 else:
@@ -373,19 +403,17 @@ class PiperRosNode(Node):
             self.slave_piper.DisableArm(7)
             if self.gripper_exist:
                 self.slave_piper.GripperCtrl(0, 1000, 0x00, 0)
-
-
 def main(args = None):
     rclpy.init(args=args)
+    executor = MultiThreadedExecutor(num_threads=3)
     piper_slavemaster_node = PiperRosNode()
+    executor.add_node(piper_slavemaster_node)
     try:
-        rclpy.spin(piper_slavemaster_node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
         piper_slavemaster_node.destroy_node()
         rclpy.shutdown()
-
-
 if __name__ == '__main__':
     main()
