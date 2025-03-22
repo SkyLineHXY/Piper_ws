@@ -1,25 +1,20 @@
-#!/usr/bin/env python3
-# -*-coding:utf8-*-
-# This file controls a single robotic arm node and handles the movement of the robotic arm with a gripper.
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 import time
 import threading
-import argparse
 import math
-from piper_sdk import *
 from piper_sdk import C_PiperInterface
 from piper_msgs.msg import PiperStatusMsg, PosCmd
-from piper_msgs.srv import Enable
 from geometry_msgs.msg import Pose
 from scipy.spatial.transform import Rotation as R  # For Euler angle to quaternion conversion
 from numpy import clip
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-class PiperRosNode(Node):
 
+
+class PiperRosNode(Node):
     def __init__(self) -> None:
         super().__init__('piper_ctrl_single_node')
         # ROS parameters
@@ -90,12 +85,10 @@ class PiperRosNode(Node):
         self.publisher_master_thread = threading.Thread(target=self.publish_master_thread)
         self.publisher_armstatus_thread = threading.Thread(target=self.publish_armstatus_thread)
         self.publisher_thread.start()
-        self.publisher_master_thread.start()
+        # self.publisher_master_thread.start()
         self.publisher_armstatus_thread.start()
-
     def GetEnableFlag(self):
         return self.__enable_flag
-
     def publish_master_thread(self):
         rate = self.create_rate(200)  # 200 Hz
         while rclpy.ok():
@@ -195,7 +188,6 @@ class PiperRosNode(Node):
         self.master_arm_status.communication_status_joint_6 = self.master_piper.GetArmStatus().arm_status.err_status.communication_status_joint_6
 
         self.master_arm_status_pub.publish(self.master_arm_status)
-
     def PublishMasterArmJointAndGripper(self):
         # master arm joint states publisher
         self.master_joint_states.header.stamp = self.get_clock().now().to_msg()
@@ -261,7 +253,6 @@ class PiperRosNode(Node):
         # self.master_joint_states.velocity = [vel_0, vel_1, vel_2, vel_3, vel_4, vel_5, 0.0,0.0]  # Example values
         # self.master_joint_states.effort = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, effort_6,0.0]
         # self.master_joint_pub.publish(self.master_joint_states)
-
     def PublishArmEndPose(self):
         # slave arm end pose publisher
         self.slave_endpos_msg.position.x = self.slave_piper.GetArmEndPoseMsgs().end_pose.X_axis / 1000000
@@ -363,9 +354,9 @@ class PiperRosNode(Node):
                     self.slave_piper.MotionCtrl_2(0x01, 0x01, vel_all)
 
                 else:
-                    self.slave_piper.MotionCtrl_2(0x01, 0x01, 30)
+                    self.slave_piper.MotionCtrl_2(0x01, 0x01, 5)
             else:
-                self.slave_piper.MotionCtrl_2(0x01, 0x01, 30)
+                self.slave_piper.MotionCtrl_2(0x01, 0x01, 5)
 
             self.slave_piper.JointCtrl(joint_0, joint_1, joint_2,
                                         joint_3, joint_4, joint_5)
@@ -373,7 +364,7 @@ class PiperRosNode(Node):
             if self.gripper_exist:
                 if len(joint_data.effort) >= 7:
                     gripper_effort = clip(joint_data.effort[6], 0.5, 3)
-                    # self.get_logger().info(f"gripper_effort: {gripper_effort}")
+
                     if not math.isnan(gripper_effort):
                         gripper_effort = round(gripper_effort * 1000)
                     else :

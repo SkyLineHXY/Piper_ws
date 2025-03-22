@@ -58,7 +58,7 @@ def generate_launch_description():
 
     # Add all actions
     ld.add_action(rviz_arg)
-    ld.add_action(joint_state_publisher_node)
+    # ld.add_action(joint_state_publisher_node)
     ld.add_action(robot_state_publisher_node)
     ld.add_action(rviz2_node)
     

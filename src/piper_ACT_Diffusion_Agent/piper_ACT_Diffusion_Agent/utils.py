@@ -500,16 +500,3 @@ def temporal_ensemble(action_blocks, weights=None):
     smoothed_action = np.tensordot(weights, action_blocks, axes=([0], [0]))
 
     return smoothed_action
-# if __name__ == '__main__':
-#     from matplotlib import pyplot as plt
-#     #
-#     action_filter = ArmActionFilter(history_length=30, smoothing_factor=0.2, filter_type='ema')
-#     # 生成模拟机械臂动作数据
-#     for i in range(2):
-#         new_action = np.random.rand(1000, 7)  # 生成随机动作
-#         smoothed_action = action_filter.smooth_action(new_action)
-#         plt.plot(new_action[:,-1], label='new_action')
-#         plt.plot(smoothed_action[:,-1], label='smoothed_action')
-#         plt.legend()
-#         plt.show()
-#         print(f"Step {i+1}: 平滑后的动作形状 {smoothed_action.shape}")
