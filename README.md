@@ -65,7 +65,7 @@ bash install/setup.bash
 ```shell
 ros2 launch piper_collection_pkg piper_slave_master_system.launch.py
 ```
-3.3 启动主从臂示教节点
+## 3.3 启动主从臂示教节点
 ```shell
 ros2 launch piper_collection_pkg slave_arm_control_node
 ```
@@ -76,3 +76,30 @@ ros2 launch piper_collection_pkg slave_arm_control_node
 目前只实现了定长度的episode收集，按下键盘c开始收集动作数据，收集完一个episode后，再按下s就保存。
 
 `data_replaying_node.py`是hdf5文件读取节点，并且绘制出曲线和video回放。
+
+# 4 Realsense D435i相机
+## 4.1 读取Realsense D435i的串口序列号
+```shell
+rs-enumerate-devices -s
+```
+目前本地的realsense序列号如下：
+wrist_camera:241222073777
+top_camera:
+front_camera:148522072680
+
+## 4.2 Realsense D435i常用的配置参数
+配置RGB和Depth的分辨率：
+```python
+    {"rgb_camera.color_profile": "640x480x60"},
+    {"depth_module.depth_profile":"640x480x60"},
+```
+启动深度图和RGB自动对齐：
+```python
+    {"align_depth.enable":True}
+```
+保持恒定的帧率：
+```python
+    {"rgb_camera.auto_exposure_priority":False},
+    {"depth_module.enable_auto_exposure":False},
+```
+USB2.0和USB3.0的摄像头配置参数有差异性,在2.0上，没法使用640x480x60这个分辨率参数

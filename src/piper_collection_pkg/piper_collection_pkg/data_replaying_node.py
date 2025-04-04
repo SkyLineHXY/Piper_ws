@@ -30,11 +30,14 @@ class RosOperator(Node):
         dataset_name = f'episode_{args.episode_idx}.hdf5'
         dataset_path = os.path.join(dataset_dir, dataset_name)
 
-        self.qpos, self.qvels, self.efforts, self.actions, self.image_dicts = self.load_hdf5(dataset_path)
+        self.qpos, self.qvels, self.efforts, self.actions, self.image_dicts,self.image_depth_dicts= self.load_hdf5(dataset_path)
 
         self.plot_qpos_action(self.qpos,self.actions,output_dir= os.path.join(dataset_dir,'output'))
 
         self.stitch_and_save_videos(image_dict=self.image_dicts,output_path=os.path.join(dataset_dir,'output',f'stitched_video_episode{self.args.episode_idx}.mp4'))
+        if self.image_depth_dicts is not None:
+            self.stitch_and_save_videos(image_dict=self.image_depth_dicts, output_path=os.path.join(dataset_dir, 'output',
+                                      f'stitched_video_depth_episode{self.args.episode_idx}.mp4'),mode='depth')
 
         # self.joint_state_msg = JointState()
         # self.joint_state_msg.name=['joint0', 'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
@@ -98,7 +101,7 @@ class RosOperator(Node):
             self.current_idx += 1
             rate.sleep()
         pass
-    def load_hdf5(self,dataset_path):
+    def load_hdf5(self,dataset_path,use_depth=True):
 
         if not os.path.isfile(dataset_path):
             print(f'Dataset does not exist at \n{dataset_path}\n')
@@ -115,10 +118,16 @@ class RosOperator(Node):
             else:
                 effort = None
             image_dict = dict()
+
             for cam_name in root[f'/observations/images/'].keys():
                 image_dict[cam_name] = root[f'/observations/images/{cam_name}'][()]
             # images = root['/observations/images/cam_realsense'][()]
-
+            if use_depth:
+                image_depth_dict = dict()
+                for cam_name in root[f'/observations/images_depth/'].keys():
+                    image_depth_dict[cam_name] = root[f'/observations/images_depth/{cam_name}'][()]
+            else:
+                image_depth_dict = None
             if compressed:
                 compress_len = root['/compress_len'][()]
         # 图像压缩
@@ -135,25 +144,36 @@ class RosOperator(Node):
                     image_list.append(image)
                 image_list[cam_name] = image_list
 
-        return qpos, qvel, effort, action, image_dict
+        return qpos, qvel, effort, action, image_dict,image_depth_dict
 
 
-    def stitch_and_save_videos(self,image_dict, output_path='stitched_video.mp4'):
+    def stitch_and_save_videos(self,image_dict, output_path='stitched_video.mp4',mode='rgb'):
         """
-            读取 image_dict 并拼接两个摄像头的视频流，保存为单个视频
-            :param image_dict: 包含两个摄像头帧的字典 {cam_name: [frames]}
+            读取 image_dict 并拼接多个摄像头的视频流，可选择是否包含深度图，保存为单个视频
+            :param image_dict: 包含摄像头帧的字典 {cam_name: [frames]}，如果 include_depth=True，字典可包含深度图
             :param output_path: 输出视频路径
+            :param mode: 选择视频类型 ("rgb" 或 "depth")
         """
+        if mode not in ["rgb", "depth"]:
+            raise ValueError("mode 必须是 'rgb' 或 'depth'")
         cam_names = list(image_dict.keys())
         if len(cam_names) < 1:
             raise ValueError("image_dict 必须包含至少一个摄像头的视频流")
+
         frames_list = [image_dict[cam] for cam in cam_names]
+        if mode == "depth":
+            for i in range(len(frames_list)):
+                frames_list[i] = [cv2.normalize(frame, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                                  for frame in frames_list[i]]
+                frames_list[i] = [cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR) for frame in frames_list[i]]
+
         heights = [frames[0].shape[0] for frames in frames_list]
         widths = [frames[0].shape[1] for frames in frames_list]
         stitched_height = max(heights)
         stitched_width = sum(widths)
+
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, 15, (stitched_width, stitched_height))
+        out = cv2.VideoWriter(output_path, fourcc, 30, (stitched_width, stitched_height))
         for frame_set in zip(*frames_list):
             stitched_frame = np.zeros((stitched_height, stitched_width, 3), dtype=np.uint8)
             x_offset = 0
@@ -201,11 +221,11 @@ def get_arguments():
     parser.add_argument('--dataset_dir', action='store', type=str,help='Dataset dir.',
                         default='/home/zzq/Desktop/piper_arm_ws/data/',required=False)
     parser.add_argument('--task_name',action='store', type=str,help='Task name.',
-                        default="pick_hxy_to_box", required=False)
+                        default="pick_blue_object_to_box", required=False)
     parser.add_argument('--episode_idx', action='store', type=int,
-                        help='Episode index.',default=0, required=False)
+                        help='Episode index.',default=1, required=False)
     parser.add_argument('--camera_names', action='store', type=str, help='camera_names',required=False,
-                        default=['cam_front','cam_wrist'])
+                        default=['cam_front','cam_wrist','cam_top'])
 
     parser.add_argument('--img_front_topic', action='store', type=str, help='img_front_topic',
                         default='/front_camera/front_camera/color/image_raw', required=False)
@@ -282,7 +302,7 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        # rclpy.shutdown()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
