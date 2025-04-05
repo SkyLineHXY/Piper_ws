@@ -61,6 +61,7 @@ class RosOperator(Node):
             self.img_wrist_depth_sub = self.create_subscription(Image,self.args.img_wrist_depth_topic,
                                                           self.img_wrist_depth_callback,10)
 
+
         self.initialize_model()
         self.inference_actions= []  #存储动作块
         self.timer_model_interface_threading = threading.Thread(target=self.model_inference)
@@ -94,6 +95,9 @@ class RosOperator(Node):
         if not self.policy.deserialize(new_state_dict):
             print("Checkpoint path does not exist")
             return False
+
+        self.kalman_filters = [Kalman1D() for _ in range(self.config['policy_config']['action_dim'])]
+
         self.policy.cuda()
         self.policy.eval()
         # 发布基础的姿态
@@ -104,29 +108,19 @@ class RosOperator(Node):
         self.img_queues['slave_arm'].append(msg)
         # self.slave_arm_deque.append(msg)
     def img_front_callback(self,msg):
-        # if len(self.img_front_deque) >= 50:
-        #     self.img_queues['cam_front'].popleft()
-            # self.img_front_deque.popleft()
+
         self.img_queues['cam_front'].append(msg)
         # self.img_front_deque.append(msg)
     def img_top_callback(self,msg):
         self.img_queues['cam_top'].append(msg)
     def img_wrist_callback(self,msg):
         self.img_queues['cam_wrist'].append(msg)
-        # if len(self.img_wrist_deque) >= 2000:
-        #     self.img_wrist_deque.popleft()
-        # self.img_wrist_deque.append(msg)
+
     def img_top_depth_callback(self,msg):
         self.img_queues['cam_top_depth'].append(msg)
     def img_front_depth_callback(self,msg):
         self.img_queues['cam_front_depth'].append(msg)
-        # if len(self.img_front_depth_deque) >= 2000:
-        #     self.img_front_depth_deque.popleft()
-        # self.img_front_depth_deque.append(msg)
-    # def img_wrist_depth_callback(self,msg):
-        # if len(self.img_wrist_depth_deque) >= 2000:
-        #     self.img_wrist_depth_deque.popleft()
-        # self.img_wrist_depth_deque.append(msg)
+
     def slave_arm_publish(self,joint):
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -191,47 +185,6 @@ class RosOperator(Node):
             "slave_arm": slave_arm
         }
 
-    def get_frame(self):
-        if len(self.img_front_deque) == 0 or (self.args.use_depth_image and len(self.img_front_depth_deque) == 0):
-            return False
-        if len(self.img_wrist_deque) == 0 or (self.args.use_depth_image and len(self.img_wrist_depth_deque) == 0):
-            return False
-        if len(self.slave_arm_deque) == 0 :
-            return False
-        latest_front_img_time = self.img_front_deque[-1].header.stamp.sec + 1e-9 * self.img_front_deque[-1].header.stamp.nanosec
-        latest_wrist_img_time = self.img_wrist_deque[-1].header.stamp.sec + 1e-9 * self.img_wrist_deque[-1].header.stamp.nanosec
-        latest_slave_time = self.slave_arm_deque[-1].header.stamp.sec + 1e-9 * self.slave_arm_deque[-1].header.stamp.nanosec
-        sync_time = min(latest_front_img_time,
-                        latest_wrist_img_time,
-                        latest_slave_time)
-        while self.img_front_deque and (
-            self.img_front_deque[0].header.stamp.sec + 1e-9 * self.img_front_deque[0].header.stamp.nanosec < sync_time):
-            self.img_front_deque.popleft()
-
-        while self.img_wrist_deque and (
-            self.img_wrist_deque[0].header.stamp.sec + 1e-9 * self.img_wrist_deque[0].header.stamp.nanosec < sync_time):
-            self.img_wrist_deque.popleft()
-
-        while self.slave_arm_deque and (
-                self.slave_arm_deque[0].header.stamp.sec + 1e-9 * self.slave_arm_deque[0].header.stamp.nanosec < sync_time):
-            self.slave_arm_deque.popleft()
-        if not self.img_wrist_deque or not self.img_front_deque  or not self.slave_arm_deque:
-            return False
-
-        img_front_msg = self.img_front_deque.popleft()
-        img_wrist_msg = self.img_wrist_deque.popleft()
-        img_wrist = self.bridge.imgmsg_to_cv2(img_wrist_msg,desired_encoding ='passthrough')
-        img_front = self.bridge.imgmsg_to_cv2(img_front_msg,desired_encoding ='passthrough')
-        img_front_depth = None
-        img_wrist_depth = None
-
-        if self.args.use_depth_image and self.img_wrist_depth_deque and self.img_front_depth_deque:
-            img_wrist_depth_msg = self.img_wrist_depth_deque.popleft()
-            img_front_depth_msg = self.img_front_depth_deque.popleft()
-            img_wrist_depth = self.bridge.imgmsg_to_cv2(img_wrist_depth_msg, desired_encoding='16UC1')
-            img_front_depth = self.bridge.imgmsg_to_cv2(img_front_depth_msg, desired_encoding='16UC1')
-        slave_arm = self.slave_arm_deque.popleft()
-
         return img_front,img_wrist,img_front_depth,img_wrist_depth, slave_arm
     def model_inference(self):
         def update_action_buffer(action_buffer, action_chunk, action_t):
@@ -251,16 +204,13 @@ class RosOperator(Node):
 
             action_buffer[:3] = action_chunk[2:]  # [:3] 是索引 0、1、2，写入 [3, 4, 5]
             => action_buffer = [3, 4, 5, 1, 2]
-            :param action_buffer:
-            :param action_chunk:
-            :param action_t:
-            :return:
             """
             start_idx = action_t % chunk_size
             end_idx = (start_idx + chunk_size) % chunk_size
             action_buffer[start_idx:] = action_chunk[:chunk_size - start_idx]
             action_buffer[:end_idx] = action_chunk[chunk_size - start_idx:]
             return action_buffer
+
         rate =self.create_rate(30)
         actions_smotion_list = []
         actions_list = []
@@ -273,8 +223,8 @@ class RosOperator(Node):
         t=0
         image_dict={}
         image_depth_dict = {}
-        pre_action = np.array(self.initial_pose)
-        action_buffer = np.zeros([chunk_size, self.config['policy_config']['action_dim']])
+        # pre_action = np.array(self.initial_pose)
+        # action_buffer = np.zeros([chunk_size, self.config['policy_config']['action_dim']])
         while rclpy.ok() and t<max_publish_step:
             result = self.get_frame_v2()
             # result = self.get_frame()`
@@ -340,16 +290,16 @@ class RosOperator(Node):
                 action_src = self.post_process(action_chunk_curr[0]).tolist()
                 actions_list.append(action_src)
             else:
-                action_buffer = update_action_buffer(action_buffer, action_chunk_curr, t)
-                raw_action = action_buffer[t % chunk_size]
-                action = self.post_process(raw_action)
-                # if args.use_actions_interpolation:
-                interp_actions = interpolate_action(self.args, pre_action, action)
-                # for act in interp_actions:
-                #     self.slave_arm_publish(act)
-                # for action in action_chunk_curr:
-                #     action = self.post_process(action).tolist()
-                #
+                smoothed_action_chunk = np.zeros_like(action_chunk_curr)
+                for i in range(action_chunk_curr.shape[0]):  # 遍历 chunk 中每个动作
+                    for j in range(7):  # 每个自由度
+                        smoothed_action_chunk[i, j] = self.kalman_filters[j].update(action_chunk_curr[i, j])
+                action_chunk_curr = smoothed_action_chunk
+                for action in action_chunk_curr:
+                    action = self.post_process(action).tolist()
+                    self.slave_arm_publish(action)
+                    rate.sleep()
+
 
             # self.inference_actions.append(all_actions.cpu().detach().numpy())
             rate.sleep()
@@ -407,7 +357,7 @@ def get_arguments():
     parser.add_argument('--arm_steps_length', action='store', type=float,
                         help='The maximum change allowed for each joint per timestep',
                         default=[0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01], required=False)
-    parser.add_argument('--temporal_agg',action='store', type=bool, default=True, required=False)
+    parser.add_argument('--temporal_agg',action='store', type=bool, default=False, required=False)
     parser.add_argument('--use_vq', action='store_true')
     parser.add_argument('--vq_class', action='store', type=int, help='vq_class')
     parser.add_argument('--vq_dim', action='store', type=int, help='vq_dim')
@@ -415,7 +365,7 @@ def get_arguments():
     parser.add_argument('--ckpt_dir', action='store', type=str,default='/media/zzq/ZZQ_SSD/ZZQ/trained_weight/dellrtx2080ti/piper_aloha/pick_blue_object_to_box/ACT/dellrtx2080_pick_blue_object_to_box_ACT_2025-04-03_23-35-10_numsteps_80000_chunksize_100_latent_dim_128')
 
                         # default='/home/zzq/Desktop/Open_Source_Project/act-plus-plus/trainings/pick_hxy_to_box/ACT/dellrtx5000_pick_hxy_to_box_ACT_2025-03-21_12-41-26_numsteps_40000_chunksize_100_latent_dim_128/', help='ckpt_dir')
-    parser.add_argument('--ckpt_name', action='store', type=str, default='policy_step_40000_seed_0.ckpt',help='ckpt_name')
+    parser.add_argument('--ckpt_name', action='store', type=str, default='policy_step_52000_seed_0.ckpt',help='ckpt_name')
     parser.add_argument('--max_publish_step', action='store', type=int, default=1000, help='max_publish_step')
     parser.add_argument('--is_eval',action='store',type=bool,default=True,help='is_eval')
     parser.add_argument('--publish_rate', action='store', type=int, help='publish_rate',

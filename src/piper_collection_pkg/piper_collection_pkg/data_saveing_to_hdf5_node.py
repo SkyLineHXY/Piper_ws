@@ -248,8 +248,6 @@ class RosOperator(Node):
         self.img_queues['cam_top'].append(msg)
     def img_front_depth_callback(self, msg):
         self.img_queues['cam_front_depth'].append(msg)
-    # def img_wrist_depth_callback(self, msg):
-    #     self.img_queues['cam_depth'].append(msg)
     def img_top_depth_callback(self, msg):
         self.img_queues['cam_top_depth'].append(msg)
     def master_arm_callback(self, msg):
@@ -269,7 +267,6 @@ class RosOperator(Node):
         #                     self.args.camera_names} if self.args.use_depth_image else {}
         count, rate, print_flag = 0, self.create_rate(self.args.frame_rate), True
         while rclpy.ok() and (count < self.args.max_timesteps + 1):
-
             result = self.get_frame_v2()
             if not result:
                 if print_flag:
@@ -278,8 +275,6 @@ class RosOperator(Node):
                 continue
             count += 1
             images, depths, master_arm, slave_arm = result['images'],result['depths'],result['master_arm'],result['slave_arm']
-
-
             for i, name in enumerate(self.camera_names):
                 image_dict[name] = images[name].copy()
                 if self.args.use_depth_image and name != 'cam_wrist':
