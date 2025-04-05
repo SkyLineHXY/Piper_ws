@@ -432,56 +432,6 @@ def make_policy(policy_class,policy_config):
     return policy
 
 
-class ArmActionFilter:
-    def __init__(self, history_length=5, smoothing_factor=0.1,filter_type='ema'):
-        """
-        机械臂动作平滑滤波器
-        :param history_length: 存储历史动作的步数
-        :param smoothing_factor: 平滑系数（仅用于EMA滤波）
-        :param filter_type: 选择滤波类型 'ema'（指数加权平均）或 'moving_average'（滑动均值）
-        """
-        self.previous_action = None  # 记录上一时间步的平滑值
-        self.history_length = history_length
-        self.smoothing_factor = smoothing_factor
-        self.filter_type = filter_type
-        self.action_history = deque(maxlen=history_length)
-
-    def update_history(self, new_action):
-        """
-        更新动作历史
-        :param new_action: 新的动作块 (30,7) numpy 数组
-        """
-        if not isinstance(new_action, np.ndarray) :
-            raise ValueError("Invalid action data type")
-        self.action_history.append(new_action)
-    def smooth_action(self, new_action):
-        """
-         对当前动作进行平滑处理
-         :param new_action: 当前动作 (30,7)
-         :return: 平滑后的动作 (30,7)
-         """
-        self.update_history(new_action)
-        if self.filter_type == 'ema':
-            return self.ema_smoothing(new_action)
-
-
-    def ema_smoothing(self, new_action):
-        """
-        指数加权平均（EMA）滤波
-        :param new_action: 当前动作 (30,7)
-        :return: 平滑后的动作 (30,7)
-        """
-        if self.previous_action is None:
-            self.previous_action = new_action.copy()
-            return new_action  # 没有历史数据，直接返回当前数据
-        smoothed_action = np.zeros_like(new_action)
-        smoothed_action[0] = self.smoothing_factor * new_action[0] + (1 - self.smoothing_factor) * self.previous_action[0]
-        for t in range(1, new_action.shape[0]):  # 在时间轴方向进行EMA平滑
-            smoothed_action[t] = self.smoothing_factor * new_action[t] + (1 - self.smoothing_factor) * smoothed_action[
-                t - 1]
-        self.previous_action = smoothed_action[-1]
-        return smoothed_action
-
 def temporal_ensemble(action_blocks, weights=None):
     """
     使用加权平均融合多个动作块，以增强动作的平滑性
@@ -500,3 +450,21 @@ def temporal_ensemble(action_blocks, weights=None):
     smoothed_action = np.tensordot(weights, action_blocks, axes=([0], [0]))
 
     return smoothed_action
+
+
+class Kalman1D:
+    def __init__(self, process_variance=1e-3, measurement_variance=1e-2):
+        self.process_variance = process_variance    # Q：过程噪声
+        self.measurement_variance = measurement_variance  # R：测量噪声
+        self.posteri_estimate = 0.0
+        self.posteri_error_estimate = 1.0
+
+    def update(self, measurement):
+        priori_estimate = self.posteri_estimate
+        priori_error_estimate = self.posteri_error_estimate + self.process_variance
+
+        kalman_gain = priori_error_estimate / (priori_error_estimate + self.measurement_variance)
+        self.posteri_estimate = priori_estimate + kalman_gain * (measurement - priori_estimate)
+        self.posteri_error_estimate = (1 - kalman_gain) * priori_error_estimate
+
+        return self.posteri_estimate
